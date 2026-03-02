@@ -40,16 +40,6 @@ recyclarr/includes/
 recyclarr/.cache/
 
 # ======================
-# PlexTraktSync (garder seulement config.yml + servers.yml)
-# ======================
-plextraktsync/.plex*.db*
-plextraktsync/.pytrakt.json
-plextraktsync/*.log
-plextraktsync/*.sqlite
-plextraktsync/__pycache__/
-plextraktsync/.env
-
-# ======================
 # Artefacts de test / doublons
 # ======================
 .backup-exports/
