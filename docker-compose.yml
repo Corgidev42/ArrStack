@@ -219,7 +219,7 @@ services:
     image: cyfershepard/jellystat:latest
     container_name: jellystat
     ports:
-      - "3000:3000"
+      - "6555:3000"
     environment:
       - POSTGRES_IP=jellystat-db
       - POSTGRES_PORT=5432

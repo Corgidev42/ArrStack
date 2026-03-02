@@ -415,6 +415,65 @@ if [ -n "$STARTUP_CHECK" ]; then
                 -H "Content-Type: application/json" -H "X-Emby-Authorization: ${JF_AUTH}" -d @- > /dev/null 2>&1
         fi
         echo -e "  ${GREEN}✓ Serveur : ${JELLYFIN_SERVER_NAME}${NC}"
+
+        # ── Plugin Trakt ─────────────────────────────────────────────
+        TRAKT_GUID="4fe3201ed6ae4f2e8917e12bda571281"
+        TRAKT_INSTALLED=$(curl -sf "${JELLYFIN_HOST}/Plugins" -H "X-Emby-Authorization: ${JF_AUTH}" 2>/dev/null \
+            | grep -o "\"Id\":\"${TRAKT_GUID}\"" || true)
+
+        if [ -z "$TRAKT_INSTALLED" ]; then
+            echo -e "  ${YELLOW}→ Installation plugin Trakt...${NC}"
+            TRAKT_VERSION=$(curl -sf "${JELLYFIN_HOST}/Packages" -H "X-Emby-Token: ${JF_TOKEN}" 2>/dev/null \
+                | jq -r ".[] | select(.guid==\"${TRAKT_GUID}\") | .versions[0].version" 2>/dev/null || echo "")
+            if [ -n "$TRAKT_VERSION" ]; then
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                    "${JELLYFIN_HOST}/Packages/Installed/${TRAKT_GUID}?assemblyGuid=${TRAKT_GUID}&version=${TRAKT_VERSION}&repositoryUrl=https://repo.jellyfin.org/files/plugin/manifest.json" \
+                    -H "X-Emby-Token: ${JF_TOKEN}")
+                if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
+                    echo -e "  ${GREEN}✓ Plugin Trakt ${TRAKT_VERSION} installé${NC}"
+                    echo -e "  ${YELLOW}⚠  Trakt sera actif après redémarrage de Jellyfin${NC}"
+                    echo -e "  ${YELLOW}   Configurer : Dashboard > Plugins > Trakt > Authorize${NC}"
+                else
+                    echo -e "  ${YELLOW}⚠  Installation Trakt échouée (HTTP ${HTTP_CODE})${NC}"
+                fi
+            else
+                echo -e "  ${YELLOW}⚠  Plugin Trakt introuvable dans le catalogue${NC}"
+            fi
+        else
+            echo -e "  ${GREEN}✓ Plugin Trakt déjà installé${NC}"
+
+            # Appliquer la config recommandée si un utilisateur est lié
+            TRAKT_CONFIG=$(curl -sf "${JELLYFIN_HOST}/Plugins/${TRAKT_GUID}/Configuration" \
+                -H "X-Emby-Token: ${JF_TOKEN}" 2>/dev/null || echo "")
+            HAS_USERS=$(echo "$TRAKT_CONFIG" | jq -r '.TraktUsers | length' 2>/dev/null || echo "0")
+
+            if [ "$HAS_USERS" -gt 0 ]; then
+                # Appliquer les settings recommandés
+                UPDATED_CONFIG=$(echo "$TRAKT_CONFIG" | jq '
+                    .TraktUsers[0] |= (
+                        .SkipUnwatchedImportFromTrakt = false |
+                        .SkipWatchedImportFromTrakt = false |
+                        .SkipPlaybackProgressImportFromTrakt = false |
+                        .PostWatchedHistory = true |
+                        .PostUnwatchedHistory = false |
+                        .PostSetWatched = true |
+                        .PostSetUnwatched = false |
+                        .ExtraLogging = false |
+                        .ExportMediaInfo = true |
+                        .SynchronizeCollections = true |
+                        .Scrobble = true |
+                        .DontRemoveItemFromTrakt = true
+                    )' 2>/dev/null || echo "")
+
+                if [ -n "$UPDATED_CONFIG" ]; then
+                    curl -sf -X POST "${JELLYFIN_HOST}/Plugins/${TRAKT_GUID}/Configuration" \
+                        -H "Content-Type: application/json" \
+                        -H "X-Emby-Token: ${JF_TOKEN}" \
+                        -d "$UPDATED_CONFIG" > /dev/null 2>&1
+                    echo -e "  ${GREEN}✓ Config Trakt optimisée (scrobble + sync)${NC}"
+                fi
+            fi
+        fi
     else
         echo -e "  ${YELLOW}⚠  Auth Jellyfin échouée — configurez via ${JELLYFIN_HOST}${NC}"
     fi
@@ -447,7 +506,7 @@ echo -e "${BLUE}║${NC} Admin        : ${GREEN}${ADMIN_USER}${NC}"
 echo -e "${BLUE}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${BLUE}║${NC} Jellyfin     : ${GREEN}http://localhost:8096${NC}"
 echo -e "${BLUE}║${NC} Jellyseerr   : ${GREEN}http://localhost:5055${NC}"
-echo -e "${BLUE}║${NC} Jellystat    : ${GREEN}http://localhost:3000${NC}"
+echo -e "${BLUE}║${NC} Jellystat    : ${GREEN}http://localhost:6555${NC}"
 echo -e "${BLUE}║${NC} Radarr       : ${GREEN}http://localhost:7878${NC}"
 echo -e "${BLUE}║${NC} Sonarr       : ${GREEN}http://localhost:8989${NC}"
 echo -e "${BLUE}║${NC} Prowlarr     : ${GREEN}http://localhost:9696${NC}"
@@ -459,7 +518,7 @@ echo -e "${BLUE}║${NC} ${YELLOW}Prochaines étapes :${NC}"
 echo -e "${BLUE}║${NC}  1. Jackett       : configurer YGG (http://localhost:9117)"
 echo -e "${BLUE}║${NC}  2. Prowlarr      : ajouter YGG Torznab depuis Jackett"
 echo -e "${BLUE}║${NC}  3. RDTClient     : configurer AllDebrid (http://localhost:6500)"
-echo -e "${BLUE}║${NC}  4. Plugin Trakt  : Dashboard > Plugins > Catalogue"
+echo -e "${BLUE}║${NC}  4. Plugin Trakt  : Dashboard > Plugins > Trakt > Authorize"
 echo -e "${BLUE}║${NC}  5. Jellyseerr    : connecter Jellyfin + Radarr/Sonarr"
 echo -e "${BLUE}║${NC}  6. Jellystat     : connecter à Jellyfin (API key)"
 echo -e "${BLUE}║${NC}  7. Infuse 8      : ajouter serveur Jellyfin"
