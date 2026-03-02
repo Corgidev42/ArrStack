@@ -227,7 +227,7 @@ if [ "$INDEXER_1337X" = "0" ]; then
                 {\"name\": \"sort\", \"value\": 2},
                 {\"name\": \"type\", \"value\": 1}
             ]
-        }" "$PROWLARR_HOST/api/v1/indexer" > /dev/null 2>&1
+        }" "$PROWLARR_HOST/api/v1/indexer" > /dev/null 2>&1 || true
     echo -e "  ${GREEN}✓ 1337x ajouté (avec FlareSolverr)${NC}"
 else
     echo -e "  ${GREEN}✓ 1337x déjà configuré${NC}"
@@ -320,7 +320,7 @@ if [ "$YGG_EXISTING" = "0" ]; then
                                 {\"name\": \"seedCriteria.discographySeedTime\", \"value\": \"\"}
                             ],
                             \"tags\": []
-                        }" > /dev/null 2>&1
+                        }" > /dev/null 2>&1 || true
                     echo -e "  ${GREEN}✓ YGGTorrent Torznab ajouté dans Prowlarr${NC}"
                 else
                     echo -e "  ${YELLOW}⚠  YGG : auth échouée (vérifiez identifiants dans .env)${NC}"
@@ -341,7 +341,7 @@ fi
 
 # Sync des indexers vers Radarr/Sonarr
 curl -sf -X POST -H "X-Api-Key: $PROWLARR_API_KEY" -H "Content-Type: application/json" \
-    -d '{"name": "AppIndexerSync"}' "$PROWLARR_HOST/api/v1/command" > /dev/null 2>&1
+    -d '{"name": "AppIndexerSync"}' "$PROWLARR_HOST/api/v1/command" > /dev/null 2>&1 || true
 echo -e "  ${GREEN}✓ Sync indexeurs → Radarr/Sonarr${NC}"
 
 echo -e "${GREEN}✅ Indexeurs configurés${NC}\n"
@@ -378,7 +378,7 @@ if [ -n "$STARTUP_CHECK" ]; then
             \"UICulture\": \"${JELLYFIN_LANG}\",
             \"MetadataCountryCode\": \"${JELLYFIN_COUNTRY}\",
             \"PreferredMetadataLanguage\": \"${JELLYFIN_LANG}\"
-        }" > /dev/null
+        }" > /dev/null 2>&1 || true
 
     # ── Wizard : utilisateur admin ───────────────────────────────────
     echo -e "  ${YELLOW}→ Création utilisateur admin...${NC}"
@@ -400,9 +400,9 @@ if [ -n "$STARTUP_CHECK" ]; then
     # ── Wizard : accès distant + compléter ───────────────────────────
     curl -sf -X POST "${JELLYFIN_HOST}/Startup/RemoteAccess" \
         -H "Content-Type: application/json" \
-        -d '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}' > /dev/null
+        -d '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}' > /dev/null 2>&1 || true
 
-    curl -sf -X POST "${JELLYFIN_HOST}/Startup/Complete" > /dev/null
+    curl -sf -X POST "${JELLYFIN_HOST}/Startup/Complete" > /dev/null 2>&1 || true
     echo -e "  ${GREEN}✓ Wizard complété${NC}"
 
     # ── Authentification ─────────────────────────────────────────────
@@ -460,7 +460,7 @@ if [ -n "$STARTUP_CHECK" ]; then
             || echo -e "  ${YELLOW}⚠  Séries déjà existante${NC}"
 
         # ── Scan + nom serveur ───────────────────────────────────────
-        curl -sf -X POST "${JELLYFIN_HOST}/Library/Refresh" -H "X-Emby-Authorization: ${JF_AUTH}" > /dev/null 2>&1
+        curl -sf -X POST "${JELLYFIN_HOST}/Library/Refresh" -H "X-Emby-Authorization: ${JF_AUTH}" > /dev/null 2>&1 || true
 
         SERVER_CONFIG=$(curl -sf "${JELLYFIN_HOST}/System/Configuration" -H "X-Emby-Authorization: ${JF_AUTH}" 2>/dev/null || echo "")
         if [ -n "$SERVER_CONFIG" ]; then
@@ -532,7 +532,20 @@ if [ -n "$STARTUP_CHECK" ]; then
         echo -e "  ${YELLOW}⚠  Auth Jellyfin échouée — configurez via ${JELLYFIN_HOST}${NC}"
     fi
 else
-    echo -e "  ${YELLOW}⚠  Jellyfin déjà configuré (wizard complété)${NC}"
+    echo -e "  ${GREEN}✓ Jellyfin déjà configuré${NC}"
+    # Authentification pour les étapes suivantes (Jellyseerr, Jellystat)
+    AUTH_RESPONSE=$(curl -sf -X POST "${JELLYFIN_HOST}/Users/AuthenticateByName" \
+        -H "Content-Type: application/json" \
+        -H "X-Emby-Authorization: MediaBrowser Client=\"Setup\", Device=\"CLI\", DeviceId=\"setup\", Version=\"1.0\"" \
+        -d "{\"Username\":\"${ADMIN_USER}\",\"Pw\":\"${ADMIN_PASSWORD}\"}" 2>/dev/null || echo "")
+    JF_TOKEN=$(echo "$AUTH_RESPONSE" | grep -o '"AccessToken":"[^"]*"' | cut -d'"' -f4)
+    JF_USER_ID=$(echo "$AUTH_RESPONSE" | grep -o '"Id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    JF_AUTH="MediaBrowser Token=\"${JF_TOKEN}\""
+    if [ -n "$JF_TOKEN" ]; then
+        echo -e "  ${GREEN}✓ Authentifié en tant que '${ADMIN_USER}'${NC}"
+    else
+        echo -e "  ${YELLOW}⚠  Auth Jellyfin échouée — certaines étapes seront ignorées${NC}"
+    fi
 fi
 
 echo -e "${GREEN}✅ Jellyfin configuré${NC}\n"
@@ -650,7 +663,7 @@ if [ -n "$JS_TOKEN_VAL" ]; then
 
             if [ -z "$JELLYSTAT_KEY" ]; then
                 curl -sf -X POST "${JELLYFIN_HOST}/Auth/Keys?app=Jellystat" \
-                    -H "X-Emby-Token: ${JF_TOKEN}" > /dev/null 2>&1
+                    -H "X-Emby-Token: ${JF_TOKEN}" > /dev/null 2>&1 || true
                 EXISTING_KEYS=$(curl -sf "${JELLYFIN_HOST}/Auth/Keys" -H "X-Emby-Token: ${JF_TOKEN}" 2>/dev/null || echo "")
                 JELLYSTAT_KEY=$(echo "$EXISTING_KEYS" | jq -r '.Items[] | select(.AppName == "Jellystat") | .AccessToken' 2>/dev/null | head -1)
                 echo -e "  ${GREEN}✓ API key Jellyfin créée pour Jellystat${NC}"
