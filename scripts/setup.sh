@@ -234,9 +234,9 @@ else
 fi
 
 # Ajouter YGG via Jackett (idempotent)
-JACKETT_YGG=$(echo "$EXISTING_INDEXERS" | jq '[.[] | select(.name == "YGG (Jackett)")] | length')
+YGG_EXISTING=$(echo "$EXISTING_INDEXERS" | jq '[.[] | select(.name | test("ygg";"i"))] | length')
 
-if [ "$JACKETT_YGG" = "0" ]; then
+if [ "$YGG_EXISTING" = "0" ]; then
     # Attendre que Jackett soit prêt
     echo -e "  ${YELLOW}→ Attente Jackett...${NC}"
     JACKETT_READY=false
@@ -271,10 +271,64 @@ if [ "$JACKETT_YGG" = "0" ]; then
             else
                 sed -i.bak "s|^JACKETT_API_KEY=.*|JACKETT_API_KEY=${JACKETT_API_KEY}|" .env && rm -f .env.bak
             fi
-
             echo -e "  ${GREEN}✓ Jackett prêt (API key: ${JACKETT_API_KEY:0:8}...)${NC}"
-            echo -e "  ${YELLOW}⚠  Configurez YGG dans Jackett : http://localhost:9117${NC}"
-            echo -e "  ${YELLOW}   Puis ajoutez le Torznab feed dans Prowlarr → Indexers → Add → Torznab${NC}"
+
+            # Configurer YGG dans Jackett si identifiants fournis
+            YGG_USERNAME="${YGG_USERNAME:-}"
+            YGG_PASSWORD="${YGG_PASSWORD:-}"
+
+            if [ -n "$YGG_USERNAME" ] && [ -n "$YGG_PASSWORD" ]; then
+                # Authentification cookie Jackett (pas de mot de passe par défaut)
+                curl -s -c /tmp/jackett-cookie -X POST "http://localhost:9117/UI/Dashboard" \
+                    --data-urlencode "password=" > /dev/null 2>&1
+
+                # Configurer l'indexer YGG avec les identifiants
+                curl -s -b /tmp/jackett-cookie -X POST \
+                    "http://localhost:9117/api/v2.0/indexers/yggtorrent/config" \
+                    -H "Content-Type: application/json" \
+                    -d "[{\"id\":\"username\",\"value\":\"${YGG_USERNAME}\"},{\"id\":\"password\",\"value\":\"${YGG_PASSWORD}\"}]" > /dev/null 2>&1
+
+                rm -f /tmp/jackett-cookie
+
+                # Vérifier que YGG est bien configuré
+                YGG_CONFIGURED=$(curl -s "http://localhost:9117/api/v2.0/indexers?configured=true&apikey=${JACKETT_API_KEY}" 2>/dev/null \
+                    | jq '[.[] | select(.id == "yggtorrent")] | length' 2>/dev/null || echo "0")
+
+                if [ "$YGG_CONFIGURED" -gt 0 ] 2>/dev/null; then
+                    echo -e "  ${GREEN}✓ YGGTorrent configuré dans Jackett${NC}"
+
+                    # Ajouter le Torznab de YGG dans Prowlarr
+                    curl -sf -X POST "$PROWLARR_HOST/api/v1/indexer" \
+                        -H "X-Api-Key: $PROWLARR_API_KEY" \
+                        -H "Content-Type: application/json" \
+                        -d "{
+                            \"name\": \"YGGTorrent (Jackett)\",
+                            \"implementation\": \"Torznab\",
+                            \"implementationName\": \"Torznab\",
+                            \"configContract\": \"TorznabSettings\",
+                            \"protocol\": \"torrent\",
+                            \"enable\": true,
+                            \"priority\": 10,
+                            \"appProfileId\": 1,
+                            \"fields\": [
+                                {\"name\": \"baseUrl\", \"value\": \"http://jackett:9117/api/v2.0/indexers/yggtorrent/results/torznab/\"},
+                                {\"name\": \"apiPath\", \"value\": \"/api\"},
+                                {\"name\": \"apiKey\", \"value\": \"${JACKETT_API_KEY}\"},
+                                {\"name\": \"minimumSeeders\", \"value\": 1},
+                                {\"name\": \"seedCriteria.seedRatio\", \"value\": \"\"},
+                                {\"name\": \"seedCriteria.seedTime\", \"value\": \"\"},
+                                {\"name\": \"seedCriteria.discographySeedTime\", \"value\": \"\"}
+                            ],
+                            \"tags\": []
+                        }" > /dev/null 2>&1
+                    echo -e "  ${GREEN}✓ YGGTorrent Torznab ajouté dans Prowlarr${NC}"
+                else
+                    echo -e "  ${YELLOW}⚠  YGG : auth échouée (vérifiez identifiants dans .env)${NC}"
+                fi
+            else
+                echo -e "  ${YELLOW}⚠  YGG_USERNAME/YGG_PASSWORD non définis dans .env${NC}"
+                echo -e "  ${YELLOW}   Configurez manuellement : http://localhost:9117${NC}"
+            fi
         else
             echo -e "  ${YELLOW}⚠  Jackett : API key non trouvée${NC}"
         fi
@@ -282,7 +336,7 @@ if [ "$JACKETT_YGG" = "0" ]; then
         echo -e "  ${YELLOW}⚠  Jackett : timeout (configurez manuellement)${NC}"
     fi
 else
-    echo -e "  ${GREEN}✓ YGG (Jackett) déjà configuré${NC}"
+    echo -e "  ${GREEN}✓ YGGTorrent déjà configuré dans Prowlarr${NC}"
 fi
 
 # Sync des indexers vers Radarr/Sonarr
@@ -484,6 +538,142 @@ fi
 echo -e "${GREEN}✅ Jellyfin configuré${NC}\n"
 
 #==============================================================================
+# ÉTAPE 6b : Configuration Jellyseerr (Jellyfin + Radarr + Sonarr)
+#==============================================================================
+echo -e "${YELLOW}🎬 [6b/7] Configuration Jellyseerr...${NC}"
+
+SEERR_HOST="http://localhost:5055"
+SEERR_INITIALIZED=$(curl -sf "${SEERR_HOST}/api/v1/settings/public" 2>/dev/null | jq -r '.initialized // false' 2>/dev/null || echo "false")
+
+if [ "$SEERR_INITIALIZED" = "false" ]; then
+    # Étape 1 : Initialisation avec Jellyfin
+    SEERR_AUTH=$(curl -s -c /tmp/seerr-cookie -X POST "${SEERR_HOST}/api/v1/auth/jellyfin" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\",\"hostname\":\"jellyfin\",\"port\":8096,\"useSsl\":false,\"urlBase\":\"\",\"email\":\"admin@local.host\",\"serverType\":2}" 2>/dev/null)
+    SEERR_USER_ID=$(echo "$SEERR_AUTH" | jq -r '.id // empty' 2>/dev/null || echo "")
+
+    if [ -n "$SEERR_USER_ID" ]; then
+        echo -e "  ${GREEN}✓ Authentification Jellyfin OK${NC}"
+
+        # Étape 2 : Sync et activation des bibliothèques
+        SEERR_LIBS=$(curl -s -b /tmp/seerr-cookie "${SEERR_HOST}/api/v1/settings/jellyfin/library?sync=true" 2>/dev/null)
+        LIB_IDS=$(echo "$SEERR_LIBS" | jq -r '.[].id' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+        if [ -n "$LIB_IDS" ]; then
+            curl -s -b /tmp/seerr-cookie "${SEERR_HOST}/api/v1/settings/jellyfin/library?enable=${LIB_IDS}" > /dev/null 2>&1
+            echo -e "  ${GREEN}✓ Bibliothèques activées${NC}"
+        fi
+
+        # Étape 3 : Tester et ajouter Radarr
+        RADARR_TEST=$(curl -s -b /tmp/seerr-cookie -X POST "${SEERR_HOST}/api/v1/settings/radarr/test" \
+            -H "Content-Type: application/json" \
+            -d "{\"hostname\":\"radarr\",\"port\":7878,\"apiKey\":\"${RADARR_API_KEY}\",\"useSsl\":false,\"baseUrl\":\"\"}" 2>/dev/null)
+        RADARR_PROFILE=$(echo "$RADARR_TEST" | jq -r '.profiles[0].id // 1' 2>/dev/null)
+        RADARR_PNAME=$(echo "$RADARR_TEST" | jq -r '.profiles[0].name // "Any"' 2>/dev/null)
+        RADARR_RDIR=$(echo "$RADARR_TEST" | jq -r '.rootFolders[0].path // "/data/media/movies"' 2>/dev/null)
+
+        curl -s -b /tmp/seerr-cookie -X POST "${SEERR_HOST}/api/v1/settings/radarr" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"Radarr\",\"hostname\":\"radarr\",\"port\":7878,\"apiKey\":\"${RADARR_API_KEY}\",\"useSsl\":false,\"baseUrl\":\"\",\"activeProfileId\":${RADARR_PROFILE},\"activeProfileName\":\"${RADARR_PNAME}\",\"activeDirectory\":\"${RADARR_RDIR}\",\"is4k\":false,\"minimumAvailability\":\"released\",\"tags\":[],\"isDefault\":true,\"syncEnabled\":false,\"preventSearch\":false,\"tagRequests\":false,\"externalUrl\":\"\",\"overrideRule\":[]}" > /dev/null 2>&1
+        echo -e "  ${GREEN}✓ Radarr connecté (profil: ${RADARR_PNAME})${NC}"
+
+        # Étape 4 : Tester et ajouter Sonarr
+        SONARR_TEST=$(curl -s -b /tmp/seerr-cookie -X POST "${SEERR_HOST}/api/v1/settings/sonarr/test" \
+            -H "Content-Type: application/json" \
+            -d "{\"hostname\":\"sonarr\",\"port\":8989,\"apiKey\":\"${SONARR_API_KEY}\",\"useSsl\":false,\"baseUrl\":\"\"}" 2>/dev/null)
+        SONARR_PROFILE=$(echo "$SONARR_TEST" | jq -r '.profiles[0].id // 1' 2>/dev/null)
+        SONARR_PNAME=$(echo "$SONARR_TEST" | jq -r '.profiles[0].name // "Any"' 2>/dev/null)
+        SONARR_RDIR=$(echo "$SONARR_TEST" | jq -r '.rootFolders[0].path // "/data/media/tv"' 2>/dev/null)
+
+        curl -s -b /tmp/seerr-cookie -X POST "${SEERR_HOST}/api/v1/settings/sonarr" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"Sonarr\",\"hostname\":\"sonarr\",\"port\":8989,\"apiKey\":\"${SONARR_API_KEY}\",\"useSsl\":false,\"baseUrl\":\"\",\"activeProfileId\":${SONARR_PROFILE},\"activeProfileName\":\"${SONARR_PNAME}\",\"activeDirectory\":\"${SONARR_RDIR}\",\"tags\":[],\"is4k\":false,\"isDefault\":true,\"enableSeasonFolders\":true,\"seriesType\":\"standard\",\"animeSeriesType\":\"anime\",\"animeTags\":[],\"monitorNewItems\":\"all\",\"syncEnabled\":false,\"preventSearch\":false,\"tagRequests\":false,\"externalUrl\":\"\",\"overrideRule\":[]}" > /dev/null 2>&1
+        echo -e "  ${GREEN}✓ Sonarr connecté (profil: ${SONARR_PNAME})${NC}"
+
+        # Étape 5 : Lancer le scan et finaliser
+        curl -s -b /tmp/seerr-cookie -X POST "${SEERR_HOST}/api/v1/settings/jellyfin/sync" \
+            -H "Content-Type: application/json" -d '{"start":true}' > /dev/null 2>&1
+        curl -s -b /tmp/seerr-cookie -X POST "${SEERR_HOST}/api/v1/settings/initialize" \
+            -H "Content-Type: application/json" > /dev/null 2>&1
+        echo -e "  ${GREEN}✓ Jellyseerr initialisé (scan en cours)${NC}"
+
+        rm -f /tmp/seerr-cookie
+    else
+        echo -e "  ${YELLOW}⚠  Jellyseerr auth échouée — configurez via ${SEERR_HOST}${NC}"
+    fi
+else
+    echo -e "  ${GREEN}✓ Jellyseerr déjà initialisé${NC}"
+fi
+
+echo -e "${GREEN}✅ Jellyseerr configuré${NC}\n"
+
+#==============================================================================
+# ÉTAPE 6c : Configuration Jellystat (connexion Jellyfin)
+#==============================================================================
+echo -e "${YELLOW}📊 [6c/7] Configuration Jellystat...${NC}"
+
+JELLYSTAT_HOST="http://localhost:6555"
+
+# Vérifier si Jellystat a déjà un utilisateur configuré
+JS_CONFIG=$(curl -sf -X POST "${JELLYSTAT_HOST}/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}" 2>/dev/null || echo "")
+JS_TOKEN_VAL=$(echo "$JS_CONFIG" | jq -r '.token // empty' 2>/dev/null || echo "")
+
+if [ -z "$JS_TOKEN_VAL" ]; then
+    # Pas de login possible → créer l'utilisateur initial
+    JS_CREATE=$(curl -sf -X POST "${JELLYSTAT_HOST}/auth/createuser" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}" 2>/dev/null || echo "")
+    JS_TOKEN_VAL=$(echo "$JS_CREATE" | jq -r '.token // empty' 2>/dev/null || echo "")
+
+    if [ -n "$JS_TOKEN_VAL" ]; then
+        echo -e "  ${GREEN}✓ Utilisateur Jellystat créé${NC}"
+    else
+        echo -e "  ${YELLOW}⚠  Jellystat : impossible de créer l'utilisateur${NC}"
+    fi
+else
+    echo -e "  ${GREEN}✓ Jellystat : login OK${NC}"
+fi
+
+if [ -n "$JS_TOKEN_VAL" ]; then
+    # Vérifier si Jellyfin est déjà connecté
+    JS_CURRENT=$(curl -sf "${JELLYSTAT_HOST}/api/getconfig" \
+        -H "Authorization: Bearer ${JS_TOKEN_VAL}" 2>/dev/null || echo "")
+    JS_JF_HOST=$(echo "$JS_CURRENT" | jq -r '.JF_HOST // empty' 2>/dev/null || echo "")
+
+    if [ -z "$JS_JF_HOST" ] || [ "$JS_JF_HOST" = "null" ]; then
+        # Créer une API key Jellyfin pour Jellystat
+        if [ -n "$JF_TOKEN" ]; then
+            # Vérifier si une key "Jellystat" existe déjà
+            EXISTING_KEYS=$(curl -sf "${JELLYFIN_HOST}/Auth/Keys" -H "X-Emby-Token: ${JF_TOKEN}" 2>/dev/null || echo "")
+            JELLYSTAT_KEY=$(echo "$EXISTING_KEYS" | jq -r '.Items[] | select(.AppName == "Jellystat") | .AccessToken' 2>/dev/null | head -1)
+
+            if [ -z "$JELLYSTAT_KEY" ]; then
+                curl -sf -X POST "${JELLYFIN_HOST}/Auth/Keys?app=Jellystat" \
+                    -H "X-Emby-Token: ${JF_TOKEN}" > /dev/null 2>&1
+                EXISTING_KEYS=$(curl -sf "${JELLYFIN_HOST}/Auth/Keys" -H "X-Emby-Token: ${JF_TOKEN}" 2>/dev/null || echo "")
+                JELLYSTAT_KEY=$(echo "$EXISTING_KEYS" | jq -r '.Items[] | select(.AppName == "Jellystat") | .AccessToken' 2>/dev/null | head -1)
+                echo -e "  ${GREEN}✓ API key Jellyfin créée pour Jellystat${NC}"
+            fi
+
+            if [ -n "$JELLYSTAT_KEY" ]; then
+                curl -sf -X POST "${JELLYSTAT_HOST}/api/setconfig" \
+                    -H "Authorization: Bearer ${JS_TOKEN_VAL}" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"JF_HOST\":\"http://jellyfin:8096\",\"JF_API_KEY\":\"${JELLYSTAT_KEY}\"}" > /dev/null 2>&1
+                echo -e "  ${GREEN}✓ Jellystat connecté à Jellyfin${NC}"
+            fi
+        else
+            echo -e "  ${YELLOW}⚠  Jellystat : token Jellyfin non disponible (configurez manuellement)${NC}"
+        fi
+    else
+        echo -e "  ${GREEN}✓ Jellystat déjà connecté à Jellyfin${NC}"
+    fi
+fi
+
+echo -e "${GREEN}✅ Jellystat configuré${NC}\n"
+
+#==============================================================================
 # ÉTAPE 7 : Import config existante + VPN check
 #==============================================================================
 echo -e "${YELLOW}📦 [7/7] Import configuration & vérification VPN...${NC}"
@@ -515,11 +705,7 @@ echo -e "${BLUE}║${NC} qBittorrent  : ${GREEN}http://localhost:8090${NC}"
 echo -e "${BLUE}║${NC} RDTClient    : ${GREEN}http://localhost:6500${NC}"
 echo -e "${BLUE}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${BLUE}║${NC} ${YELLOW}Prochaines étapes :${NC}"
-echo -e "${BLUE}║${NC}  1. Jackett       : configurer YGG (http://localhost:9117)"
-echo -e "${BLUE}║${NC}  2. Prowlarr      : ajouter YGG Torznab depuis Jackett"
-echo -e "${BLUE}║${NC}  3. RDTClient     : configurer AllDebrid (http://localhost:6500)"
-echo -e "${BLUE}║${NC}  4. Plugin Trakt  : Dashboard > Plugins > Trakt > Authorize"
-echo -e "${BLUE}║${NC}  5. Jellyseerr    : connecter Jellyfin + Radarr/Sonarr"
-echo -e "${BLUE}║${NC}  6. Jellystat     : connecter à Jellyfin (API key)"
-echo -e "${BLUE}║${NC}  7. Infuse 8      : ajouter serveur Jellyfin"
+echo -e "${BLUE}║${NC}  1. RDTClient     : configurer AllDebrid (http://localhost:6500)"
+echo -e "${BLUE}║${NC}  2. Plugin Trakt  : Dashboard > Plugins > Trakt > Authorize"
+echo -e "${BLUE}║${NC}  3. Infuse 8      : ajouter serveur Jellyfin"
 echo -e "${BLUE}╚══════════════════════════════════════════════════════╝${NC}"
