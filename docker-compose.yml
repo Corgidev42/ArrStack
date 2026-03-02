@@ -277,28 +277,39 @@ services:
 
 #==============================================================================
 # Volumes Docker (configurations persistantes)
+# external: true → réutilise les volumes existants sans conflit
 #==============================================================================
 volumes:
   gluetun_config:
     name: gluetun_config
+    external: true
   qbittorrent_config:
     name: qbittorrent_config
+    external: true
   prowlarr_config:
     name: prowlarr_config
+    external: true
   radarr_config:
     name: radarr_config
+    external: true
   sonarr_config:
     name: sonarr_config
+    external: true
   jellyseerr_config:
     name: jellyseerr_config
+    external: true
   jellyfin_config:
     name: jellyfin_config
+    external: true
   jellystat_db:
     name: jellystat_db
+    external: true
   jackett_config:
     name: jackett_config
+    external: true
   rdtclient_config:
     name: rdtclient_config
+    external: true
 
 #==============================================================================
 # Réseau isolé
@@ -306,7 +317,4 @@ volumes:
 networks:
   media-network:
     name: media-network
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+    external: true

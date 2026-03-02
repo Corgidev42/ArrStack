@@ -97,6 +97,15 @@ echo -e "${GREEN}✅ API keys sauvegardées dans .env${NC}\n"
 # ÉTAPE 3 : Démarrage des conteneurs
 #==============================================================================
 echo -e "${YELLOW}🐳 [3/7] Démarrage des conteneurs...${NC}"
+
+# Créer les volumes et le réseau s'ils n'existent pas (external: true dans compose)
+for vol in gluetun_config qbittorrent_config prowlarr_config radarr_config sonarr_config \
+           jellyseerr_config jellyfin_config jellystat_db jackett_config rdtclient_config; do
+    docker volume inspect "$vol" > /dev/null 2>&1 || docker volume create "$vol" > /dev/null 2>&1
+done
+docker network inspect media-network > /dev/null 2>&1 || \
+    docker network create --driver bridge --subnet 172.20.0.0/16 media-network > /dev/null 2>&1
+
 $COMPOSE up -d --remove-orphans
 echo -e "${GREEN}✅ Conteneurs lancés${NC}\n"
 
@@ -355,14 +364,13 @@ echo -e "${YELLOW}📦 [5c/7] Configuration RDTClient (AllDebrid) + Download Cli
 RDT_HOST="http://localhost:6500"
 RDT_USER="${ADMIN_USER}"
 RDT_PASSWORD="${ADMIN_PASSWORD}"
-RDT_TOKEN=""
+RDT_COOKIE="/tmp/rdtclient-cookie"
+RDT_AUTHED=false
 
 # ── Créer le compte RDTClient (premier lancement) ────────────────────────
-RDT_REGISTER=$(curl -s -w "\n%{http_code}" -X POST "${RDT_HOST}/Api/Authentication/Register" \
+RDT_REG_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${RDT_HOST}/Api/Authentication/Register" \
     -H "Content-Type: application/json" \
     -d "{\"userName\":\"${RDT_USER}\",\"password\":\"${RDT_PASSWORD}\"}" 2>/dev/null)
-RDT_REG_CODE=$(echo "$RDT_REGISTER" | tail -1)
-RDT_REG_BODY=$(echo "$RDT_REGISTER" | sed '$d')
 
 if [ "$RDT_REG_CODE" = "200" ] || [ "$RDT_REG_CODE" = "201" ]; then
     echo -e "  ${GREEN}✓ Compte RDTClient créé (${RDT_USER})${NC}"
@@ -370,54 +378,59 @@ else
     echo -e "  ${GREEN}✓ Compte RDTClient existe déjà${NC}"
 fi
 
-# ── Login RDTClient ──────────────────────────────────────────────────────
-RDT_LOGIN=$(curl -s -X POST "${RDT_HOST}/Api/Authentication/Login" \
+# ── Login RDTClient (cookie-based auth) ──────────────────────────────────
+RDT_LOGIN_CODE=$(curl -s -o /dev/null -w "%{http_code}" -c "$RDT_COOKIE" \
+    -X POST "${RDT_HOST}/Api/Authentication/Login" \
     -H "Content-Type: application/json" \
-    -d "{\"userName\":\"${RDT_USER}\",\"password\":\"${RDT_PASSWORD}\"}" 2>/dev/null || echo "")
-RDT_TOKEN=$(echo "$RDT_LOGIN" | jq -r '.token // empty' 2>/dev/null || echo "")
-# Fallback: si le body est directement le token (string)
-if [ -z "$RDT_TOKEN" ]; then
-    RDT_TOKEN=$(echo "$RDT_LOGIN" | tr -d '"' | grep -E '^[A-Za-z0-9_.-]+$' || echo "")
-fi
+    -d "{\"userName\":\"${RDT_USER}\",\"password\":\"${RDT_PASSWORD}\"}" 2>/dev/null)
 
-if [ -n "$RDT_TOKEN" ]; then
+if [ "$RDT_LOGIN_CODE" = "200" ] && [ -f "$RDT_COOKIE" ]; then
+    RDT_AUTHED=true
     echo -e "  ${GREEN}✓ Authentifié sur RDTClient${NC}"
 
     # ── Configurer AllDebrid comme provider ───────────────────────────────
     ALLDEBRID_API_KEY="${ALLDEBRID_API_KEY:-}"
     if [ -n "$ALLDEBRID_API_KEY" ]; then
-        # Récupérer les settings actuels
-        RDT_SETTINGS=$(curl -s -H "Authorization: Bearer ${RDT_TOKEN}" \
-            "${RDT_HOST}/Api/Settings/Get" 2>/dev/null || echo "")
+        # Récupérer les settings actuels (tableau d'objets {key, value, ...})
+        RDT_SETTINGS=$(curl -s -b "$RDT_COOKIE" \
+            "${RDT_HOST}/Api/Settings" 2>/dev/null || echo "[]")
 
-        CURRENT_PROVIDER=$(echo "$RDT_SETTINGS" | jq -r '.provider // empty' 2>/dev/null || echo "")
+        # Provider:Provider — 0=RealDebrid, 1=AllDebrid, 2=Premiumize, 3=TorBox, 4=DebridLink
+        CURRENT_PROVIDER=$(echo "$RDT_SETTINGS" | jq -r '.[] | select(.key == "Provider:Provider") | .value // empty' 2>/dev/null || echo "")
 
-        if [ "$CURRENT_PROVIDER" != "AllDebrid" ]; then
-            # Configurer le provider AllDebrid
-            curl -s -X PUT "${RDT_HOST}/Api/Settings/Update" \
-                -H "Authorization: Bearer ${RDT_TOKEN}" \
+        if [ "$CURRENT_PROVIDER" != "1" ]; then
+            # Configurer le provider AllDebrid + API key en un seul PUT (format: tableau)
+            curl -s -b "$RDT_COOKIE" -X PUT "${RDT_HOST}/Api/Settings" \
                 -H "Content-Type: application/json" \
-                -d '{"settingId": "Provider:Provider", "value": "AllDebrid"}' > /dev/null 2>&1
-
-            curl -s -X PUT "${RDT_HOST}/Api/Settings/Update" \
-                -H "Authorization: Bearer ${RDT_TOKEN}" \
-                -H "Content-Type: application/json" \
-                -d "{\"settingId\": \"Provider:AllDebridApiKey\", \"value\": \"${ALLDEBRID_API_KEY}\"}" > /dev/null 2>&1
+                -d "[
+                    {\"key\": \"Provider:Provider\", \"value\": 1},
+                    {\"key\": \"Provider:ApiKey\", \"value\": \"${ALLDEBRID_API_KEY}\"}
+                ]" > /dev/null 2>&1
 
             echo -e "  ${GREEN}✓ AllDebrid configuré (API key: ${ALLDEBRID_API_KEY:0:8}...)${NC}"
         else
-            echo -e "  ${GREEN}✓ AllDebrid déjà configuré${NC}"
+            # Vérifier si la clé API est à jour
+            CURRENT_KEY=$(echo "$RDT_SETTINGS" | jq -r '.[] | select(.key == "Provider:ApiKey") | .value // empty' 2>/dev/null || echo "")
+            if [ "$CURRENT_KEY" != "$ALLDEBRID_API_KEY" ]; then
+                curl -s -b "$RDT_COOKIE" -X PUT "${RDT_HOST}/Api/Settings" \
+                    -H "Content-Type: application/json" \
+                    -d "[{\"key\": \"Provider:ApiKey\", \"value\": \"${ALLDEBRID_API_KEY}\"}]" > /dev/null 2>&1
+                echo -e "  ${GREEN}✓ AllDebrid API key mise à jour${NC}"
+            else
+                echo -e "  ${GREEN}✓ AllDebrid déjà configuré${NC}"
+            fi
         fi
 
-        # Configurer le download path
-        curl -s -X PUT "${RDT_HOST}/Api/Settings/Update" \
-            -H "Authorization: Bearer ${RDT_TOKEN}" \
+        # Configurer le mapped path (chemin vu par *arr)
+        curl -s -b "$RDT_COOKIE" -X PUT "${RDT_HOST}/Api/Settings" \
             -H "Content-Type: application/json" \
-            -d '{"settingId": "DownloadClient:MappedPath", "value": "/data/downloads"}' > /dev/null 2>&1
+            -d '[{"key": "DownloadClient:MappedPath", "value": "/data/downloads"}]' > /dev/null 2>&1
     else
         echo -e "  ${YELLOW}⚠  ALLDEBRID_API_KEY non définie dans .env${NC}"
         echo -e "  ${YELLOW}   → Configurez manuellement : http://localhost:6500${NC}"
     fi
+
+    rm -f "$RDT_COOKIE"
 else
     echo -e "  ${YELLOW}⚠  RDTClient : auth échouée — configurez via http://localhost:6500${NC}"
 fi
