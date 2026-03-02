@@ -516,29 +516,25 @@ fi
 echo -e "${GREEN}✅ RDTClient + Download Clients configurés${NC}\n"
 
 #==============================================================================
-# ÉTAPE 5d : Limites de taille fichier Radarr (15 Go max)
+# ÉTAPE 5d : Taille max releases Radarr (15 Go via Indexer config)
 #==============================================================================
-echo -e "${YELLOW}📏 [5d/7] Limite taille fichiers Radarr (15 Go)...${NC}"
+echo -e "${YELLOW}📏 [5d/7] Limite taille releases Radarr (15 Go)...${NC}"
 
-# maxSize/preferredSize en Mo/min — 128 Mo/min ≈ 15 Go pour un film de 2h
-RADARR_QD=$(curl -sf -H "X-Api-Key: ${RADARR_API_KEY}" \
-    "http://localhost:7878/api/v3/qualitydefinition" 2>/dev/null || echo "[]")
+CURRENT_MAX=$(curl -sf -H "X-Api-Key: ${RADARR_API_KEY}" \
+    "http://localhost:7878/api/v3/config/indexer" 2>/dev/null | jq -r '.maximumSize // 0')
 
-NEEDS_UPDATE=$(echo "$RADARR_QD" | jq '[.[] | select(.maxSize == null or .maxSize > 128)] | length' 2>/dev/null || echo "0")
-
-if [ "$NEEDS_UPDATE" != "0" ]; then
-    echo "$RADARR_QD" | jq '[.[] | if .minSize > 115 then .minSize = 2 else . end | .maxSize = 128 | .preferredSize = 115]' \
-        | curl -sf -X PUT "http://localhost:7878/api/v3/qualitydefinition/update" \
-            -H "X-Api-Key: ${RADARR_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d @- > /dev/null 2>&1 && \
-    echo -e "  ${GREEN}✓ Toutes les qualités : max 128 Mo/min (≈15 Go/film 2h)${NC}" || \
-    echo -e "  ${RED}✗ Échec mise à jour quality definitions${NC}"
+if [ "$CURRENT_MAX" != "15000" ]; then
+    curl -sf -X PUT "http://localhost:7878/api/v3/config/indexer" \
+        -H "X-Api-Key: ${RADARR_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{"id":1,"maximumSize":15000}' > /dev/null 2>&1 && \
+    echo -e "  ${GREEN}✓ Maximum Size indexer : 15000 MB${NC}" || \
+    echo -e "  ${RED}✗ Échec configuration Maximum Size${NC}"
 else
-    echo -e "  ${GREEN}✓ Limites déjà configurées${NC}"
+    echo -e "  ${GREEN}✓ Maximum Size déjà à 15000 MB${NC}"
 fi
 
-echo -e "${GREEN}✅ Limites Radarr configurées${NC}\n"
+echo -e "${GREEN}✅ Limite Radarr configurée${NC}\n"
 
 #==============================================================================
 # ÉTAPE 6 : Configuration Jellyfin (wizard + bibliothèques)
