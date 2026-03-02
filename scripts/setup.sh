@@ -123,6 +123,7 @@ wait_for_service "Radarr"   "http://localhost:7878/api/v3/system/status?apikey=$
 wait_for_service "Sonarr"   "http://localhost:8989/api/v3/system/status?apikey=${SONARR_API_KEY}" 90
 wait_for_service "Prowlarr" "http://localhost:9696/api/v1/system/status?apikey=${PROWLARR_API_KEY}" 90
 wait_for_service "Jellyfin" "http://localhost:8096/health" 90
+wait_for_service "RDTClient" "http://localhost:6500" 90
 # Jackett vérifié plus tard via docker exec (API protégée par cookie)
 echo -e "${GREEN}✅ Services prêts${NC}\n"
 
@@ -345,6 +346,161 @@ curl -sf -X POST -H "X-Api-Key: $PROWLARR_API_KEY" -H "Content-Type: application
 echo -e "  ${GREEN}✓ Sync indexeurs → Radarr/Sonarr${NC}"
 
 echo -e "${GREEN}✅ Indexeurs configurés${NC}\n"
+
+#==============================================================================
+# ÉTAPE 5c : Configuration RDTClient + Download Clients Radarr/Sonarr
+#==============================================================================
+echo -e "${YELLOW}📦 [5c/7] Configuration RDTClient (AllDebrid) + Download Clients...${NC}"
+
+RDT_HOST="http://localhost:6500"
+RDT_USER="${ADMIN_USER}"
+RDT_PASSWORD="${ADMIN_PASSWORD}"
+RDT_TOKEN=""
+
+# ── Créer le compte RDTClient (premier lancement) ────────────────────────
+RDT_REGISTER=$(curl -s -w "\n%{http_code}" -X POST "${RDT_HOST}/Api/Authentication/Register" \
+    -H "Content-Type: application/json" \
+    -d "{\"userName\":\"${RDT_USER}\",\"password\":\"${RDT_PASSWORD}\"}" 2>/dev/null)
+RDT_REG_CODE=$(echo "$RDT_REGISTER" | tail -1)
+RDT_REG_BODY=$(echo "$RDT_REGISTER" | sed '$d')
+
+if [ "$RDT_REG_CODE" = "200" ] || [ "$RDT_REG_CODE" = "201" ]; then
+    echo -e "  ${GREEN}✓ Compte RDTClient créé (${RDT_USER})${NC}"
+else
+    echo -e "  ${GREEN}✓ Compte RDTClient existe déjà${NC}"
+fi
+
+# ── Login RDTClient ──────────────────────────────────────────────────────
+RDT_LOGIN=$(curl -s -X POST "${RDT_HOST}/Api/Authentication/Login" \
+    -H "Content-Type: application/json" \
+    -d "{\"userName\":\"${RDT_USER}\",\"password\":\"${RDT_PASSWORD}\"}" 2>/dev/null || echo "")
+RDT_TOKEN=$(echo "$RDT_LOGIN" | jq -r '.token // empty' 2>/dev/null || echo "")
+# Fallback: si le body est directement le token (string)
+if [ -z "$RDT_TOKEN" ]; then
+    RDT_TOKEN=$(echo "$RDT_LOGIN" | tr -d '"' | grep -E '^[A-Za-z0-9_.-]+$' || echo "")
+fi
+
+if [ -n "$RDT_TOKEN" ]; then
+    echo -e "  ${GREEN}✓ Authentifié sur RDTClient${NC}"
+
+    # ── Configurer AllDebrid comme provider ───────────────────────────────
+    ALLDEBRID_API_KEY="${ALLDEBRID_API_KEY:-}"
+    if [ -n "$ALLDEBRID_API_KEY" ]; then
+        # Récupérer les settings actuels
+        RDT_SETTINGS=$(curl -s -H "Authorization: Bearer ${RDT_TOKEN}" \
+            "${RDT_HOST}/Api/Settings/Get" 2>/dev/null || echo "")
+
+        CURRENT_PROVIDER=$(echo "$RDT_SETTINGS" | jq -r '.provider // empty' 2>/dev/null || echo "")
+
+        if [ "$CURRENT_PROVIDER" != "AllDebrid" ]; then
+            # Configurer le provider AllDebrid
+            curl -s -X PUT "${RDT_HOST}/Api/Settings/Update" \
+                -H "Authorization: Bearer ${RDT_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d '{"settingId": "Provider:Provider", "value": "AllDebrid"}' > /dev/null 2>&1
+
+            curl -s -X PUT "${RDT_HOST}/Api/Settings/Update" \
+                -H "Authorization: Bearer ${RDT_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"settingId\": \"Provider:AllDebridApiKey\", \"value\": \"${ALLDEBRID_API_KEY}\"}" > /dev/null 2>&1
+
+            echo -e "  ${GREEN}✓ AllDebrid configuré (API key: ${ALLDEBRID_API_KEY:0:8}...)${NC}"
+        else
+            echo -e "  ${GREEN}✓ AllDebrid déjà configuré${NC}"
+        fi
+
+        # Configurer le download path
+        curl -s -X PUT "${RDT_HOST}/Api/Settings/Update" \
+            -H "Authorization: Bearer ${RDT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"settingId": "DownloadClient:MappedPath", "value": "/data/downloads"}' > /dev/null 2>&1
+    else
+        echo -e "  ${YELLOW}⚠  ALLDEBRID_API_KEY non définie dans .env${NC}"
+        echo -e "  ${YELLOW}   → Configurez manuellement : http://localhost:6500${NC}"
+    fi
+else
+    echo -e "  ${YELLOW}⚠  RDTClient : auth échouée — configurez via http://localhost:6500${NC}"
+fi
+
+# ── Ajouter RDTClient comme Download Client dans Radarr ─────────────────
+RADARR_DL_HOST="http://localhost:7878"
+EXISTING_DL=$(curl -sf -H "X-Api-Key: ${RADARR_API_KEY}" \
+    "${RADARR_DL_HOST}/api/v3/downloadclient" 2>/dev/null || echo "[]")
+RDT_EXISTS_RADARR=$(echo "$EXISTING_DL" | jq '[.[] | select(.name == "RDTClient")] | length')
+
+if [ "$RDT_EXISTS_RADARR" = "0" ]; then
+    curl -sf -X POST "${RADARR_DL_HOST}/api/v3/downloadclient" \
+        -H "X-Api-Key: ${RADARR_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"enable\": true,
+            \"protocol\": \"torrent\",
+            \"priority\": 1,
+            \"removeCompletedDownloads\": true,
+            \"removeFailedDownloads\": true,
+            \"name\": \"RDTClient\",
+            \"implementation\": \"QBittorrent\",
+            \"configContract\": \"QBittorrentSettings\",
+            \"fields\": [
+                {\"name\": \"host\", \"value\": \"rdtclient\"},
+                {\"name\": \"port\", \"value\": 6500},
+                {\"name\": \"useSsl\", \"value\": false},
+                {\"name\": \"username\", \"value\": \"${RDT_USER}\"},
+                {\"name\": \"password\", \"value\": \"${RDT_PASSWORD}\"},
+                {\"name\": \"movieCategory\", \"value\": \"radarr\"},
+                {\"name\": \"initialState\", \"value\": 0},
+                {\"name\": \"sequentialOrder\", \"value\": false},
+                {\"name\": \"firstAndLast\", \"value\": false},
+                {\"name\": \"contentLayout\", \"value\": 0}
+            ],
+            \"tags\": []
+        }" > /dev/null 2>&1 && \
+    echo -e "  ${GREEN}✓ Radarr → RDTClient (rdtclient:6500, cat: radarr)${NC}" || \
+    echo -e "  ${RED}✗ Radarr → RDTClient échoué${NC}"
+else
+    echo -e "  ${GREEN}✓ Radarr → RDTClient déjà configuré${NC}"
+fi
+
+# ── Ajouter RDTClient comme Download Client dans Sonarr ─────────────────
+SONARR_DL_HOST="http://localhost:8989"
+EXISTING_DL_S=$(curl -sf -H "X-Api-Key: ${SONARR_API_KEY}" \
+    "${SONARR_DL_HOST}/api/v3/downloadclient" 2>/dev/null || echo "[]")
+RDT_EXISTS_SONARR=$(echo "$EXISTING_DL_S" | jq '[.[] | select(.name == "RDTClient")] | length')
+
+if [ "$RDT_EXISTS_SONARR" = "0" ]; then
+    curl -sf -X POST "${SONARR_DL_HOST}/api/v3/downloadclient" \
+        -H "X-Api-Key: ${SONARR_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"enable\": true,
+            \"protocol\": \"torrent\",
+            \"priority\": 1,
+            \"removeCompletedDownloads\": true,
+            \"removeFailedDownloads\": true,
+            \"name\": \"RDTClient\",
+            \"implementation\": \"QBittorrent\",
+            \"configContract\": \"QBittorrentSettings\",
+            \"fields\": [
+                {\"name\": \"host\", \"value\": \"rdtclient\"},
+                {\"name\": \"port\", \"value\": 6500},
+                {\"name\": \"useSsl\", \"value\": false},
+                {\"name\": \"username\", \"value\": \"${RDT_USER}\"},
+                {\"name\": \"password\", \"value\": \"${RDT_PASSWORD}\"},
+                {\"name\": \"tvCategory\", \"value\": \"sonarr\"},
+                {\"name\": \"initialState\", \"value\": 0},
+                {\"name\": \"sequentialOrder\", \"value\": false},
+                {\"name\": \"firstAndLast\", \"value\": false},
+                {\"name\": \"contentLayout\", \"value\": 0}
+            ],
+            \"tags\": []
+        }" > /dev/null 2>&1 && \
+    echo -e "  ${GREEN}✓ Sonarr → RDTClient (rdtclient:6500, cat: sonarr)${NC}" || \
+    echo -e "  ${RED}✗ Sonarr → RDTClient échoué${NC}"
+else
+    echo -e "  ${GREEN}✓ Sonarr → RDTClient déjà configuré${NC}"
+fi
+
+echo -e "${GREEN}✅ RDTClient + Download Clients configurés${NC}\n"
 
 #==============================================================================
 # ÉTAPE 6 : Configuration Jellyfin (wizard + bibliothèques)
@@ -718,7 +874,6 @@ echo -e "${BLUE}║${NC} qBittorrent  : ${GREEN}http://localhost:8090${NC}"
 echo -e "${BLUE}║${NC} RDTClient    : ${GREEN}http://localhost:6500${NC}"
 echo -e "${BLUE}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${BLUE}║${NC} ${YELLOW}Prochaines étapes :${NC}"
-echo -e "${BLUE}║${NC}  1. RDTClient     : configurer AllDebrid (http://localhost:6500)"
-echo -e "${BLUE}║${NC}  2. Plugin Trakt  : Dashboard > Plugins > Trakt > Authorize"
-echo -e "${BLUE}║${NC}  3. Infuse 8      : ajouter serveur Jellyfin"
+echo -e "${BLUE}║${NC}  1. Plugin Trakt  : Dashboard > Plugins > Trakt > Authorize"
+echo -e "${BLUE}║${NC}  2. Infuse 8      : ajouter serveur Jellyfin"
 echo -e "${BLUE}╚══════════════════════════════════════════════════════╝${NC}"

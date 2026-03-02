@@ -31,7 +31,6 @@ make setup
 | Jackett | 9117 | http://localhost:9117 (YGGTorrent / trackers prives) |
 | qBittorrent | 8090 | http://localhost:8090 (via VPN) |
 | RDTClient | 6500 | http://localhost:6500 (AllDebrid / Real-Debrid) |
-| Jellyseerr | 5055 | http://localhost:5055 (Requetes) |
 | Jellystat | 3000 | http://localhost:3000 (Stats Jellyfin) |
 | Flaresolverr | 8191 | http://localhost:8191 (Anti-Cloudflare) |
 | Recyclarr | - | TRaSH Guides auto-sync |
