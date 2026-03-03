@@ -54,7 +54,7 @@ echo -e "${GREEN}✅ Dépendances OK${NC}\n"
 echo -e "${YELLOW}📁 [1/7] Création structure de dossiers...${NC}"
 mkdir -p "${DATA_PATH}/downloads"/{incomplete,complete}
 mkdir -p "${DATA_PATH}/media"/{movies,tv}
-mkdir -p ./backups ./config-exports ./prowlarr ./radarr ./sonarr
+mkdir -p ./config-exports ./prowlarr ./radarr ./sonarr
 echo -e "${GREEN}✅ Structure créée${NC}\n"
 
 #==============================================================================

@@ -1,8 +1,8 @@
 #!/bin/bash
 #==============================================================================
-# Script de Nettoyage Radical - Stack Servarr
-# Description: Supprime tous les conteneurs, volumes et configs locales
-# Usage: chmod +x cleanup.sh && ./cleanup.sh
+# Script de Nettoyage Radical - ArrStack
+# Description: Supprime tous les conteneurs, volumes, configs et données
+# Usage: make clean  ou  chmod +x scripts/cleanup.sh && ./scripts/cleanup.sh
 #==============================================================================
 
 set -e
@@ -11,35 +11,50 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-echo -e "${YELLOW}=== Nettoyage Radical de la Stack Servarr ===${NC}\n"
+# Se placer à la racine du projet
+cd "$(dirname "$0")/.."
+
+echo -e "${YELLOW}=== Nettoyage Radical de ArrStack ===${NC}\n"
 
 # Confirmation de sécurité
-read -p "⚠️  ATTENTION: Cette action va supprimer TOUS les conteneurs, volumes et configurations. Continuer? (oui/non): " confirmation
+echo -e "${RED}⚠️  ATTENTION: Cette action va supprimer :${NC}"
+echo -e "  • Tous les conteneurs de la stack"
+echo -e "  • Tous les volumes Docker (configs persistantes)"
+echo -e "  • Le réseau media-network"
+echo -e "  • Les configs locales (prowlarr/, radarr/, sonarr/, recyclarr/)"
+echo -e ""
+read -p "Continuer ? (oui/non): " confirmation
 if [ "$confirmation" != "oui" ]; then
-    echo -e "${RED}Annulation du nettoyage.${NC}"
+    echo -e "${RED}Annulation.${NC}"
     exit 0
 fi
 
-echo -e "\n${YELLOW}Étape 1: Arrêt et suppression des conteneurs Docker...${NC}"
+# Demander si on supprime aussi les données média
+echo -e ""
+read -p "Supprimer aussi les données (downloads + médias) ? (oui/non): " del_data
 
-# Liste des conteneurs Servarr à supprimer
+#==============================================================================
+# Étape 1 : Arrêt et suppression des conteneurs
+#==============================================================================
+echo -e "\n${YELLOW}Étape 1: Arrêt et suppression des conteneurs...${NC}"
+
 CONTAINERS=(
-    "prowlarr"
-    "radarr" 
-    "sonarr"
-    "jackett"
-    "jellyseerr"
-    "overseerr"
+    "gluetun"
     "qbittorrent"
     "flaresolverr"
-    "gluetun"
+    "jackett"
+    "prowlarr"
+    "radarr"
+    "sonarr"
+    "jellyseerr"
     "jellyfin"
     "jellystat"
     "jellystat-db"
-    "rdtclient"
     "recyclarr"
+    "rdtclient"
 )
 
 for container in "${CONTAINERS[@]}"; do
@@ -50,25 +65,21 @@ for container in "${CONTAINERS[@]}"; do
     fi
 done
 
-# Supprimer tous les conteneurs restants (optionnel - décommentez si nécessaire)
-# echo -e "\n${YELLOW}Suppression de TOUS les conteneurs...${NC}"
-# docker stop $(docker ps -aq) 2>/dev/null || true
-# docker rm -f $(docker ps -aq) 2>/dev/null || true
-
+#==============================================================================
+# Étape 2 : Suppression des volumes Docker
+#==============================================================================
 echo -e "\n${YELLOW}Étape 2: Suppression des volumes Docker...${NC}"
 
-# Liste des volumes à supprimer
 VOLUMES=(
+    "gluetun_config"
+    "qbittorrent_config"
     "prowlarr_config"
     "radarr_config"
     "sonarr_config"
-    "jackett_config"
     "jellyseerr_config"
     "jellyfin_config"
     "jellystat_db"
-    "qbittorrent_config"
-    "flaresolverr_config"
-    "gluetun_config"
+    "jackett_config"
     "rdtclient_config"
 )
 
@@ -79,51 +90,60 @@ for volume in "${VOLUMES[@]}"; do
     fi
 done
 
-# Supprimer tous les volumes orphelins
 echo -e "  ${YELLOW}→${NC} Nettoyage des volumes orphelins..."
-docker volume prune -f
+docker volume prune -f 2>/dev/null || true
 
-echo -e "\n${YELLOW}Étape 3: Suppression des réseaux Docker...${NC}"
+#==============================================================================
+# Étape 3 : Suppression du réseau Docker
+#==============================================================================
+echo -e "\n${YELLOW}Étape 3: Suppression du réseau Docker...${NC}"
 docker network rm media-network 2>/dev/null || true
-docker network prune -f
 
-echo -e "\n${YELLOW}Étape 4: Suppression des dossiers de configuration locaux...${NC}"
+#==============================================================================
+# Étape 4 : Suppression des configs locales du projet
+#==============================================================================
+echo -e "\n${YELLOW}Étape 4: Suppression des configs locales...${NC}"
 
-# Dossiers dans ~/Library/Application Support/
-CONFIG_DIRS=(
-    "$HOME/Library/Application Support/prowlarr"
-    "$HOME/Library/Application Support/radarr"
-    "$HOME/Library/Application Support/sonarr"
-    "$HOME/Library/Application Support/jellyseerr"
-    "$HOME/Library/Application Support/qbittorrent"
-    "$HOME/Library/Application Support/jellyfin"
+LOCAL_DIRS=(
+    "./prowlarr"
+    "./radarr"
+    "./sonarr"
+    "./config-exports"
 )
 
-for dir in "${CONFIG_DIRS[@]}"; do
+for dir in "${LOCAL_DIRS[@]}"; do
     if [ -d "$dir" ]; then
         echo -e "  ${RED}→${NC} Suppression de ${dir}..."
         rm -rf "$dir"
     fi
 done
 
-# Autres dossiers résiduels possibles
-RESIDUAL_DIRS=(
-    "$HOME/.config/prowlarr"
-    "$HOME/.config/radarr"
-    "$HOME/.config/sonarr"
-    "$HOME/.config/qBittorrent"
-)
+# Recyclarr : supprimer les données générées mais garder recyclarr.yml
+if [ -d "./recyclarr" ]; then
+    echo -e "  ${RED}→${NC} Nettoyage recyclarr (logs, state, resources)..."
+    rm -rf ./recyclarr/logs ./recyclarr/state ./recyclarr/resources ./recyclarr/configs ./recyclarr/includes
+    rm -f ./recyclarr/settings.yml
+fi
 
-for dir in "${RESIDUAL_DIRS[@]}"; do
-    if [ -d "$dir" ]; then
-        echo -e "  ${RED}→${NC} Suppression de ${dir}..."
-        rm -rf "$dir"
+#==============================================================================
+# Étape 5 : Suppression des données (optionnel)
+#==============================================================================
+if [ "$del_data" = "oui" ]; then
+    DATA_PATH="${DATA_PATH:-/Users/dev/data}"
+    echo -e "\n${YELLOW}Étape 5: Suppression des données (${DATA_PATH})...${NC}"
+    if [ -d "$DATA_PATH" ]; then
+        echo -e "  ${RED}→${NC} Suppression de ${DATA_PATH}/downloads..."
+        rm -rf "${DATA_PATH}/downloads"
+        echo -e "  ${RED}→${NC} Suppression de ${DATA_PATH}/media..."
+        rm -rf "${DATA_PATH}/media"
     fi
-done
+else
+    echo -e "\n${YELLOW}Étape 5: Données conservées.${NC}"
+fi
 
-echo -e "\n${YELLOW}Étape 5: Nettoyage final Docker...${NC}"
-docker system prune -a -f --volumes
-
-echo -e "\n${GREEN}✅ Nettoyage terminé avec succès!${NC}"
-echo -e "${YELLOW}Vous pouvez maintenant déployer la nouvelle stack avec:${NC}"
-echo -e "  ${GREEN}docker-compose up -d${NC}\n"
+#==============================================================================
+# Résumé
+#==============================================================================
+echo -e "\n${GREEN}✅ Nettoyage terminé !${NC}"
+echo -e "${BLUE}Pour redéployer :${NC}"
+echo -e "  ${GREEN}make setup${NC}\n"
